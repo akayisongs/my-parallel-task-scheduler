@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Parallel Task Scheduler.vcxproj" Id="dd17b981-4fd2-4a32-8a81-86463bea8c73" />
+</Solution>
