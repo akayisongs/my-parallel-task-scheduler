@@ -8,6 +8,9 @@
 #include <functional>
 #include <cstddef>
 #include <stdexcept>
+#include <future>
+#include <memory>
+#include <type_traits>
 
 class ThreadPool {
 private:
@@ -64,15 +67,26 @@ public:
 	ThreadPool(ThreadPool&&) = delete;
 	ThreadPool& operator=(ThreadPool&&) = delete;
 
-	/* 无参无返回值任务提交接口 */
-	void enqueue(std::function<void()> task) {
+	template<class F,class... Args>
+	auto enqueue(F&& f, Args&&... args)
+	    ->std::future<std::invoke_result_t<F, Args...>> { // 将函数返回值的类型提前推导出来
+		using return_type = std::invoke_result_t<F, Args...>;
+
+		auto task = std::make_shared<std::packaged_task<return_type()>>( // packaged_task不可拷贝，利用makeshared造出新对象并拿到指针
+			std::bind(std::forward<F>(f), std::forward<Args>(args)...)
+		);
+
+		std::future<return_type> res = task->get_future();
 		{ // unique_lock作用域
 			std::unique_lock<std::mutex> lock(queue_mutex_);
 
 			if (stop_) { throw std::runtime_error("此线程池已停止！"); }
 
-			tasks_.emplace(std::move(task)); // 此处emplace更好，当传入lambda函数时原地构造
+			tasks_.emplace([task]() { // 此处emplace更好，当传入lambda函数时原地构造
+				(*task)(); // 将打包好的函数放进无参传入的lambda函数中放进任务队列
+				});
 		}
 		cv_.notify_one();
+		return res;
 	}
 };

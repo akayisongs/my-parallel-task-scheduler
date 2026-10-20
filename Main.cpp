@@ -1,23 +1,38 @@
 ﻿#include <iostream>
+#include <vector>
 #include <chrono>
 #include "ThreadPool.h"
 
+// 一个带参数、带返回值的普通计算函数
+int multiply(int a, int b) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    return a * b;
+}
+
 int main() {
-    // 创建一个拥有 4 个工作线程的线程池
     ThreadPool pool(4);
 
-    // 循环向线程池塞入 8 个任务
-    for (int i = 0; i < 8; ++i) {
-        pool.enqueue([i]() {
-            // 打印当前任务编号，以及正在执行它的工作线程 ID
-            std::cout << "Task " << i << " is running on thread "
-                << std::this_thread::get_id() << "\n";
+    // 用来存放 8 个异步任务的“未来提货单”
+    std::vector<std::future<int>> results;
 
-            // 模拟任务耗时 100 毫秒
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            });
+    for (int i = 1; i <= 8; ++i) {
+        // 测试 1：直接传普通函数指针和两个参数
+        if (i % 2 == 1) {
+            results.emplace_back(pool.enqueue(multiply, i, 10));
+        }
+        // 测试 2：传带参数、带返回值的 Lambda 表达式
+        else {
+            results.emplace_back(pool.enqueue([](int x) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                return x * x;
+                }, i));
+        }
     }
 
-    // main 函数结束时，pool 会自动触发你写的析构函数，等待所有任务跑完后安全退出
+    // 主线程按顺序从 future 中提取计算结果（.get() 会自动阻塞等待对应任务算完）
+    for (size_t i = 0; i < results.size(); ++i) {
+        std::cout << "Task " << i + 1 << " result: " << results[i].get() << "\n";
+    }
+
     return 0;
 }
