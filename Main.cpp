@@ -12,7 +12,6 @@ int multiply(int a, int b) {
 int main() {
     ThreadPool pool(4);
 
-    // 用来存放 8 个异步任务的“未来提货单”
     std::vector<std::future<int>> results;
 
     for (int i = 1; i <= 8; ++i) {
@@ -32,6 +31,20 @@ int main() {
     // 主线程按顺序从 future 中提取计算结果（.get() 会自动阻塞等待对应任务算完）
     for (size_t i = 0; i < results.size(); ++i) {
         std::cout << "Task " << i + 1 << " result: " << results[i].get() << "\n";
+    }
+
+    // 投递一个必崩的任务进线程池
+    auto bad_future = pool.enqueue([]() -> int {
+        throw std::runtime_error("矩阵维度不匹配，计算失败！");
+        return 42;
+        });
+
+    // 主线程调用 .get() 时，异常跨越线程边界，在主线程里炸开并被接住：
+    try {
+        int val = bad_future.get();
+    }
+    catch (const std::exception& e) {
+        std::cout << "主线程成功捕获后台任务的异常: " << e.what() << "\n";
     }
 
     return 0;
