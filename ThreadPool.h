@@ -11,6 +11,8 @@
 #include <future>
 #include <memory>
 #include <type_traits>
+#include <concepts>
+#include <utility>
 
 class ThreadPool {
 private:
@@ -18,13 +20,13 @@ private:
 	/* 状态与同步基础设施 */
 	bool stop_{ false };
 	std::mutex queue_mutex_;
-	std::condition_variable cv_;
+	std::condition_variable cv_; // jthread中的stoptoken中断信号无法直接被cv识别，需维护stop变量
 
 	/* 被保护的共享资源 */
 	std::queue<std::function<void()>> tasks_;
 
 	/* 执行实体 */
-	std::vector<std::thread> workers_;
+	std::vector<std::jthread> workers_;
 
 public:
 	explicit ThreadPool(std::size_t threads) {
@@ -54,9 +56,6 @@ public:
 		// unique_lock作用域
 		{ std::unique_lock<std::mutex> lock(queue_mutex_);  stop_ = true; }
 		cv_.notify_all();
-		for (std::thread& worker : workers_) {
-			if (worker.joinable()) { worker.join(); }
-		}
 	}
 
 	// 禁用拷贝语义
@@ -67,13 +66,14 @@ public:
 	ThreadPool(ThreadPool&&) = delete;
 	ThreadPool& operator=(ThreadPool&&) = delete;
 
-	template<class F,class... Args>
+	template<class F,class... Args> requires std::invocable<F, Args...>
 	auto enqueue(F&& f, Args&&... args)
 	    ->std::future<std::invoke_result_t<F, Args...>> { // 将函数返回值的类型提前推导出来
 		using return_type = std::invoke_result_t<F, Args...>;
 
 		auto task = std::make_shared<std::packaged_task<return_type()>>( // packaged_task不可拷贝，利用makeshared造出新对象并拿到指针
-			std::bind(std::forward<F>(f), std::forward<Args>(args)...)
+			[f = std::forward<F>(f), ...args = std::forward<Args>(args)]() mutable -> return_type
+			{return std::invoke(std::move(f), std::move(args)...);}// invoke可以自动推导如成员函数指针传入
 		);
 
 		std::future<return_type> res = task->get_future();
