@@ -1,0 +1,17 @@
+experiment,threads,chunk_size,time_ms,speedup
+scaling,1,16,344.845,1.54144
+scaling,2,16,183.614,2.89497
+scaling,4,16,97.4107,5.45688
+scaling,8,16,96.1664,5.52748
+scaling,12,16,84.8306,6.26612
+scaling,16,16,93.4403,5.68875
+scaling,24,16,71.5346,7.43079
+scaling,32,16,74.2224,7.1617
+granularity,8,1,79.0211,6.72679
+granularity,8,2,80.6051,6.5946
+granularity,8,4,74.3688,7.1476
+granularity,8,8,71.1483,7.47113
+granularity,8,16,78.4888,6.77241
+granularity,8,32,76.0812,6.98672
+granularity,8,64,83.8509,6.33933
+granularity,8,128,74.9623,7.09101
