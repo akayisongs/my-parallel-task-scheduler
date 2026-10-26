@@ -1,0 +1,17 @@
+experiment,param,time_ms,speedup
+scaling,1,272.385,1.82743
+scaling,2,134.208,3.70891
+scaling,4,70.8495,7.02567
+scaling,8,52.1527,9.54438
+scaling,12,48.048,10.3597
+scaling,16,48.6674,10.2279
+scaling,24,48.2105,10.3248
+scaling,32,48.5559,10.2514
+granularity,16,0.7482,0
+granularity,64,0.6584,0
+granularity,256,0.7017,0
+granularity,1024,0.7365,0
+granularity,4096,6.8296,0
+granularity,16384,27.4024,0
+granularity,65536,109.866,0
+granularity,262144,459.089,0
