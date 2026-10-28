@@ -74,8 +74,6 @@ double run_granularity_test(std::size_t num_threads, std::size_t num_tasks,
     std::vector<double>& C, std::size_t N) {
     ThreadPool pool(num_threads);
     std::fill(C.begin(), C.end(), 0.0);
-    std::vector<std::future<void>> futures;
-    futures.reserve(num_tasks);
 
     std::size_t total_elements = N * N;
     std::size_t elements_per_task = (total_elements + num_tasks - 1) / num_tasks;
@@ -84,17 +82,15 @@ double run_granularity_test(std::size_t num_threads, std::size_t num_tasks,
 
     for (std::size_t idx = 0; idx < total_elements; idx += elements_per_task) {
         std::size_t end_idx = std::min(idx + elements_per_task, total_elements);
-        futures.emplace_back(pool.enqueue([&A, &B, &C, N, idx, end_idx]() {
+        pool.enqueue_detached([&A, &B, &C, idx, end_idx]() {
             // 为了纯粹测量“调度器锁竞争与任务分发开销”，所有粒度统一执行恒定计算量
             for (std::size_t pos = idx; pos < end_idx; ++pos) {
                 C[pos] = A[pos] * B[pos] + 1.0;
             }
-            }));
+            });
     }
 
-    for (auto& fut : futures) {
-        fut.get();
-    }
+    pool.wait_all();
 
     const auto end_time = std::chrono::steady_clock::now();
     return std::chrono::duration<double, std::milli>(end_time - start_time).count();
@@ -123,7 +119,7 @@ int main() {
     double baseline_ms = baseline_total / 3.0;
     std::cout << "Baseline (1 Thread) Avg Time: " << std::fixed << std::setprecision(2) << baseline_ms << " ms\n\n";
 
-    std::ofstream csv("benchmark_results_v2.3.csv");
+    std::ofstream csv("benchmark_results_v2.4.csv");
     csv << "experiment,param,time_ms,speedup\n";
 
     // 不同线程数的扩展性测试（固定每次切 16 行，跑 3 次取平均）
@@ -149,6 +145,6 @@ int main() {
     }
 
     csv.close();
-    std::cout << "\n压测完成！修正后的数据已写入 benchmark_results_v2.3.csv\n";
+    std::cout << "\n压测完成！修正后的数据已写入 benchmark_results_v2.4.csv\n";
     return 0;
 }
