@@ -24,6 +24,7 @@
     <ProjectGuid>{dd17b981-4fd2-4a32-8a81-86463bea8c73}</ProjectGuid>
     <RootNamespace>ParallelTaskScheduler</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>Parallel-Task-Scheduler</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -146,6 +147,7 @@
     <ClInclude Include="ThreadPool.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="bench_scheduler.cpp" />
     <ClCompile Include="gemm_benchmark.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
