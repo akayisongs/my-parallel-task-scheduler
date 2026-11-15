@@ -51,7 +51,7 @@ namespace bench {
     // ---------------------------------------------------------------- 1. 契约
     template <class P>
     concept TaskScheduler = requires(P & p, const P & cp) {
-        { p.wait_all() }        -> std::same_as<void>;
+        { p.wait_all() }                 -> std::same_as<void>;
         { cp.pending_tasks() }  noexcept -> std::same_as<std::size_t>;
         { cp.is_stopped() }     noexcept -> std::same_as<bool>;
     };
@@ -68,13 +68,25 @@ namespace bench {
         { p.max_queue_depth() } noexcept -> std::same_as<std::size_t>;
     };
 
+    template <class P>
+    concept HasBatch = requires(P & p) {
+        p.make_batch();
+    };
+
+    template <class P>
+    concept HasBatchStats = requires(const P & p) {
+        { p.consumer_acquisitions() } noexcept -> std::same_as<std::size_t>;
+        { p.avg_take() }              noexcept -> std::same_as<double>;
+        { p.steady_max_depth() }      noexcept -> std::same_as<std::size_t>;
+    };
+
     static_assert(TaskScheduler<szz::ThreadPool>);
     static_assert(DetachedSubmittable<szz::ThreadPool, void (*)()>);
     static_assert(HasStats<szz::ThreadPool>, "基线必须带 park_count / max_queue_depth");
 
 #if BENCH_HAS_V25
-    static_assert(TaskScheduler<szz::v25::ThreadPool>);
-    static_assert(DetachedSubmittable<szz::v25::ThreadPool, void (*)()>);
+    static_assert(TaskScheduler<szz::batch::ThreadPool>);
+    static_assert(DetachedSubmittable<szz::batch::ThreadPool, void (*)()>);
 #endif
 
     // ---------------------------------------------------------------- 2. 负载
@@ -100,6 +112,9 @@ namespace bench {
         double      ms{ 0.0 };
         std::size_t parks{ 0 };   // 0 = 该臂没有仪表盘
         std::size_t depth{ 0 };
+        std::size_t acq{ 0 };
+        double      avg_take{ 0.0 };
+        std::size_t s_depth{ 0 };
     };
 
     // ---------------------------------------------------------------- 4. 一次测量
@@ -119,9 +134,18 @@ namespace bench {
         const auto t0 = Clock::now();
 
         if (pt.producers <= 1) {
-            for (const auto& r : ranges) {
-                const std::size_t b = r.first, e = r.second;
-                pool.enqueue_detached([&in, &out, b, e] { elementwise(in, out, b, e); });
+            if constexpr (HasBatch<Pool>) {
+                auto batch = pool.make_batch();
+                for (const auto& r : ranges) {
+                    const std::size_t b = r.first, e = r.second;
+                    batch.submit([&in, &out, b, e] { elementwise(in, out, b, e); });
+                }
+            }
+            else {
+                for (const auto& r : ranges) {
+                    const std::size_t b = r.first, e = r.second;
+                    pool.enqueue_detached([&in, &out, b, e] { elementwise(in, out, b, e); });
+                }
             }
         }
         else {
@@ -129,13 +153,22 @@ namespace bench {
             producers.reserve(pt.producers);
             for (std::size_t p = 0; p < pt.producers; ++p) {
                 producers.emplace_back([&, p] {
-                    for (std::size_t i = p; i < ranges.size(); i += pt.producers) {
-                        const std::size_t b = ranges[i].first, e = ranges[i].second;
-                        pool.enqueue_detached([&in, &out, b, e] { elementwise(in, out, b, e); });
+                    if constexpr (HasBatch<Pool>) {
+                        auto batch = pool.make_batch();
+                        for (std::size_t i = p; i < ranges.size(); i += pt.producers) {
+                            const std::size_t b = ranges[i].first, e = ranges[i].second;
+                            batch.submit([&in, &out, b, e] { elementwise(in, out, b, e); });
+                        }
+                    }
+                    else {
+                        for (std::size_t i = p; i < ranges.size(); i += pt.producers) {
+                            const std::size_t b = ranges[i].first, e = ranges[i].second;
+                            pool.enqueue_detached([&in, &out, b, e] { elementwise(in, out, b, e); });
+                        }
                     }
                     });
             }
-        }                                          // producers 析构 → join，计入计时
+        }
 
         pool.wait_all();
         const auto t1 = Clock::now();
@@ -146,6 +179,12 @@ namespace bench {
         if constexpr (HasStats<Pool>) {            // 计时区外读取
             s.parks = pool.park_count();
             s.depth = pool.max_queue_depth();
+        }
+
+        if constexpr (HasBatchStats<Pool>) {
+            s.acq = pool.consumer_acquisitions();
+            s.avg_take = pool.avg_take();
+            s.s_depth = pool.steady_max_depth();
         }
         return s;
     }
@@ -185,16 +224,21 @@ namespace bench {
         using pool_type = szz::ThreadPool;
     };
 
+    struct ArmTwin {
+        static constexpr const char* name = "v2.4-twin";
+        using pool_type = szz::ThreadPool;
+    };
+
 #if BENCH_HAS_V25
     struct ArmV25 {
         static constexpr const char* name = "v2.5";     // 生产端批量
-        using pool_type = szz::v25::ThreadPool;
+        using pool_type = szz::batch::ThreadPool;
     };
 #endif
 
     template <class... A> struct ArmList {};
 
-    using Arms = ArmList< ArmBase
+    using Arms = ArmList< ArmBase, ArmTwin
 #if BENCH_HAS_V25
         , ArmV25
 #endif
@@ -222,7 +266,7 @@ int main(int argc, char** argv)
 
     const std::size_t kWaves = (argc > 1)
         ? static_cast<std::size_t>(std::max(1, std::atoi(argv[1]))) : 7u;
-    const char* kOut = (argc > 2) ? argv[2] : "bench_baseline.csv";
+    const char* kOut = (argc > 2) ? argv[2] : "benchmark_results_v2.5.csv";
 
     constexpr std::size_t N = 1024;
     Buffers in(N * N), out(N * N);
@@ -232,6 +276,7 @@ int main(int argc, char** argv)
     const std::vector<std::size_t> producer_counts = { 1, 2, 3, 4 };
 
     std::vector<Point> grid;
+
     for (std::size_t t : thread_counts)   grid.push_back({ t, 1, 64 });      // A. 线程扩展
     for (std::size_t k : task_counts)     grid.push_back({ 8, 1, k });       // B. 粒度扫描
     for (std::size_t t : { 1, 2, 4, 16 }) grid.push_back({ t, 1, 262144 });  // C. 决定性实验
@@ -257,7 +302,7 @@ int main(int argc, char** argv)
         };
 
     std::cout << "grid: " << grid.size() << " points x " << kWaves << " waves, "
-        << (BENCH_HAS_V25 ? 2 : 1) << " arm(s)\n"
+        << (BENCH_HAS_V25 ? 3 : 2) << " arm(s)\n"
         << "discarding wave 0 as warm-up\n\n";
 
     for (std::size_t w = 0; w < kWaves; ++w) {
@@ -281,18 +326,135 @@ int main(int argc, char** argv)
         }
     }
 
-    // ---------------------------------------------------------------- CSV
-    std::ofstream csv(kOut);
-    csv << "arm,threads,producers,n_tasks,wave,ms,parks,max_depth\n" << std::setprecision(6);
-    for (const auto& r : records)
-        for (std::size_t w = 0; w < r.samples.size(); ++w)
-            csv << r.arm << ',' << r.pt.threads << ',' << r.pt.producers << ','
-            << r.pt.n_tasks << ',' << w << ',' << r.samples[w].ms << ','
-            << r.samples[w].parks << ',' << r.samples[w].depth << '\n';
+    // ---------------------------------------------------------------- 1. 原始波次宽表 CSV（按臂横向分列）
+    {
+        std::ofstream csv(kOut);
+        if (!csv.is_open()) {
+            std::cerr << "\n[ERROR] 无法写入文件: " << kOut
+                << " (请先关闭正在打开该文件的 Excel 窗口)\n";
+        }
+        else {
+            // 1.1 动态生成表头：以后在 Arms 中加新臂，列会自动往右追加
+            csv << "threads,producers,n_tasks,wave";
+            for_each_arm(Arms{}, [&]<class Arm>() { csv << ',' << Arm::name << "_ms"; });
+            for_each_arm(Arms{}, [&]<class Arm>() { csv << ',' << Arm::name << "_parks"; });
+            for_each_arm(Arms{}, [&]<class Arm>() { csv << ',' << Arm::name << "_depth"; });
+            for_each_arm(Arms{}, [&]<class Arm>() {
+                if constexpr (HasBatchStats<typename Arm::pool_type>) {
+                    csv << ',' << Arm::name << "_acq"
+                        << ',' << Arm::name << "_avg_take"
+                        << ',' << Arm::name << "_s_depth";
+                }
+            });
+            csv << '\n' << std::fixed << std::setprecision(6);
 
-    // ---------------------------------------------------------------- 汇总
+            // 1.2 按 (Point, wave) 横向对齐输出各臂数据
+            for (const Point& pt : grid) {
+                for (std::size_t w = 0; w < kWaves; ++w) {
+                    csv << pt.threads << ',' << pt.producers << ',' << pt.n_tasks << ',' << w;
+
+                    // 横向并排：各臂耗时 (ms)
+                    for_each_arm(Arms{}, [&]<class Arm>() {
+                        const auto& s = records[record_index(Arm::name, pt)].samples[w];
+                        csv << ',' << s.ms;
+                    });
+                    // 横向并排：各臂等待次数 (parks)
+                    for_each_arm(Arms{}, [&]<class Arm>() {
+                        const auto& s = records[record_index(Arm::name, pt)].samples[w];
+                        csv << ',' << s.parks;
+                    });
+                    // 横向并排：各臂最大深度 (depth)
+                    for_each_arm(Arms{}, [&]<class Arm>() {
+                        const auto& s = records[record_index(Arm::name, pt)].samples[w];
+                        csv << ',' << s.depth;
+                    });
+                    // 横向并排：带批量探针的臂追加 acq / avg_take / s_depth
+                    for_each_arm(Arms{}, [&]<class Arm>() {
+                        if constexpr (HasBatchStats<typename Arm::pool_type>) {
+                            const auto& s = records[record_index(Arm::name, pt)].samples[w];
+                            csv << ',' << s.acq << ',' << s.avg_take << ',' << s.s_depth;
+                        }
+                    });
+                    csv << '\n';
+                }
+            }
+            csv.flush();
+            std::cout << "\n[CSV] 原始波次横向宽表已写入 -> " << kOut << '\n';
+        }
+    }
+
+    // ---------------------------------------------------------------- 2. 统计汇总宽表 CSV（每点一行，各臂并排）
+    {
+        const char* kSummaryOut = "benchmark_summary_wide.csv";
+        std::ofstream sum_csv(kSummaryOut);
+        if (sum_csv.is_open()) {
+            sum_csv << "threads,producers,n_tasks";
+            for_each_arm(Arms{}, [&]<class Arm>() { sum_csv << ',' << Arm::name << "_median_ms"; });
+            for_each_arm(Arms{}, [&]<class Arm>() { sum_csv << ',' << Arm::name << "_iqr_ms"; });
+            for_each_arm(Arms{}, [&]<class Arm>() { sum_csv << ',' << Arm::name << "_spread_pct"; });
+            for_each_arm(Arms{}, [&]<class Arm>() { sum_csv << ',' << Arm::name << "_us_task"; });
+            for_each_arm(Arms{}, [&]<class Arm>() { sum_csv << ',' << Arm::name << "_parks"; });
+            for_each_arm(Arms{}, [&]<class Arm>() { sum_csv << ',' << Arm::name << "_depth"; });
+            for_each_arm(Arms{}, [&]<class Arm>() {
+                if constexpr (HasBatchStats<typename Arm::pool_type>) {
+                    sum_csv << ',' << Arm::name << "_acq"
+                        << ',' << Arm::name << "_avg_take"
+                        << ',' << Arm::name << "_s_depth";
+                }
+            });
+            sum_csv << '\n' << std::fixed << std::setprecision(6);
+
+            auto calc_stats = [&](const char* arm, Point pt) -> Stats {
+                const auto& samps = records[record_index(arm, pt)].samples;
+                std::vector<double> v;
+                for (std::size_t i = (samps.size() > 1 ? 1 : 0); i < samps.size(); ++i)
+                    v.push_back(samps[i].ms);
+                return summarize(v);
+                };
+
+            for (const Point& pt : grid) {
+                sum_csv << pt.threads << ',' << pt.producers << ',' << pt.n_tasks;
+
+                for_each_arm(Arms{}, [&]<class Arm>() {
+                    sum_csv << ',' << calc_stats(Arm::name, pt).median;
+                });
+                for_each_arm(Arms{}, [&]<class Arm>() {
+                    sum_csv << ',' << calc_stats(Arm::name, pt).iqr();
+                });
+                for_each_arm(Arms{}, [&]<class Arm>() {
+                    sum_csv << ',' << calc_stats(Arm::name, pt).spread_pct();
+                });
+                for_each_arm(Arms{}, [&]<class Arm>() {
+                    const double med = calc_stats(Arm::name, pt).median;
+                    sum_csv << ',' << (med * 1000.0 / static_cast<double>(pt.n_tasks));
+                });
+                for_each_arm(Arms{}, [&]<class Arm>() {
+                    const auto& samps = records[record_index(Arm::name, pt)].samples;
+                    sum_csv << ',' << (samps.empty() ? 0 : samps.back().parks);
+                });
+                for_each_arm(Arms{}, [&]<class Arm>() {
+                    const auto& samps = records[record_index(Arm::name, pt)].samples;
+                    sum_csv << ',' << (samps.empty() ? 0 : samps.back().depth);
+                });
+                for_each_arm(Arms{}, [&]<class Arm>() {
+                    if constexpr (HasBatchStats<typename Arm::pool_type>) {
+                        const auto& samps = records[record_index(Arm::name, pt)].samples;
+                        if (samps.empty()) sum_csv << ",0,0,0";
+                        else sum_csv << ',' << samps.back().acq
+                            << ',' << samps.back().avg_take
+                            << ',' << samps.back().s_depth;
+                    }
+                });
+                sum_csv << '\n';
+            }
+            sum_csv.flush();
+            std::cout << "[CSV] 汇总横向宽表已写入 -> " << kSummaryOut << '\n';
+        }
+    }
+
+    // ---------------------------------------------------------------- 3. 终端汇总打印
     std::cout << "\n=== summary (wave 0 discarded) ===\n"
-        << "arm        thr  prd       n     median       IQR   spread   us/task   parks   depth\n";
+        << "arm        thr  prd        n     median        IQR   spread   us/task    parks   depth     acq  avg_take  s_depth\n";
 
     for (const auto& r : records) {
         std::vector<double> v;
@@ -310,9 +472,14 @@ int main(int argc, char** argv)
             << std::setw(10) << std::setprecision(3)
             << (s.median * 1000.0 / static_cast<double>(r.pt.n_tasks));
 
-        if (!r.samples.empty())
-            std::cout << std::setw(9) << r.samples.back().parks
-            << std::setw(8) << r.samples.back().depth;
+        if (!r.samples.empty()) {
+            const auto& last = r.samples.back();
+            std::cout << std::setw(9) << last.parks
+                << std::setw(8) << last.depth
+                << std::setw(8) << last.acq
+                << std::setw(10) << std::setprecision(1) << last.avg_take
+                << std::setw(9) << last.s_depth;
+        }
         std::cout << '\n';
     }
 

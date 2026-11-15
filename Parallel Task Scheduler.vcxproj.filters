@@ -18,6 +18,9 @@
     <ClInclude Include="ThreadPool.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="ThreadPoolV25.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="gemm_benchmark.cpp">
