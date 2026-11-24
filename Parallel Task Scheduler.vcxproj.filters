@@ -21,11 +21,11 @@
     <ClInclude Include="ThreadPoolV25.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="SchedulerContract.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="gemm_benchmark.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="bench_scheduler.cpp">
       <Filter>源文件</Filter>
     </ClCompile>

@@ -14,15 +14,19 @@
 //    * 每点 N 次采样，报 median + IQR，丢第 0 波
 //    * 统计量在计时区外读取，不污染测量
 // ============================================================================
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <windows.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <concepts>
 #include <cstdlib>
 #include <fstream>
@@ -33,8 +37,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
-#include <windows.h>
 
+#include "SchedulerContract.h"
 #include "ThreadPool.h"
 
 #if __has_include("ThreadPoolV25.h")
@@ -48,45 +52,48 @@ namespace bench {
 
     using Clock = std::chrono::steady_clock;
 
+    template <class T>
+    inline void do_not_optimize(const T& value) noexcept {
+#if defined(__GNUC__) || defined(__clang__)
+        asm volatile("" : : "r,m"(value) : "memory");
+#else
+        volatile auto sink = value;
+        (void)sink;
+#endif
+    }
+
     // ---------------------------------------------------------------- 1. 契约
     template <class P>
-    concept TaskScheduler = requires(P & p, const P & cp) {
-        { p.wait_all() }                 -> std::same_as<void>;
-        { cp.pending_tasks() }  noexcept -> std::same_as<std::size_t>;
-        { cp.is_stopped() }     noexcept -> std::same_as<bool>;
-    };
+    concept TaskScheduler = szz::contract::TaskScheduler<P>;
 
     template <class P, class F>
-    concept DetachedSubmittable = requires(P & p, F && f) {
-        p.enqueue_detached(std::forward<F>(f));
-    };
+    concept DetachedSubmittable = szz::contract::DetachedSubmittable<P, F>;
+
+    template <class P, class F>
+    concept FutureSubmittable = szz::contract::FutureSubmittable<P, F>;
 
     // 只有带仪表盘的池才满足；将来某个臂没有也不影响编译
     template <class P>
-    concept HasStats = requires(const P & p) {
-        { p.park_count() }      noexcept -> std::same_as<std::size_t>;
-        { p.max_queue_depth() } noexcept -> std::same_as<std::size_t>;
-    };
+    concept HasStats = szz::contract::HasStats<P>;
 
     template <class P>
-    concept HasBatch = requires(P & p) {
-        p.make_batch();
-    };
+    concept HasBatch = szz::contract::BatchSubmittable<P>;
 
     template <class P>
-    concept HasBatchStats = requires(const P & p) {
-        { p.consumer_acquisitions() } noexcept -> std::same_as<std::size_t>;
-        { p.avg_take() }              noexcept -> std::same_as<double>;
-        { p.steady_max_depth() }      noexcept -> std::same_as<std::size_t>;
-    };
+    concept HasBatchStats = szz::contract::HasBatchStats<P>;
 
     static_assert(TaskScheduler<szz::ThreadPool>);
     static_assert(DetachedSubmittable<szz::ThreadPool, void (*)()>);
+    static_assert(FutureSubmittable<szz::ThreadPool, void (*)()>);
     static_assert(HasStats<szz::ThreadPool>, "基线必须带 park_count / max_queue_depth");
 
 #if BENCH_HAS_V25
     static_assert(TaskScheduler<szz::batch::ThreadPool>);
     static_assert(DetachedSubmittable<szz::batch::ThreadPool, void (*)()>);
+    static_assert(FutureSubmittable<szz::batch::ThreadPool, void (*)()>);
+    static_assert(HasStats<szz::batch::ThreadPool>);
+    static_assert(HasBatch<szz::batch::ThreadPool>);
+    static_assert(HasBatchStats<szz::batch::ThreadPool>);
 #endif
 
     // ---------------------------------------------------------------- 2. 负载
@@ -129,6 +136,7 @@ namespace bench {
         for (std::size_t b = 0; b < n; b += per)
             ranges.emplace_back(b, std::min(b + per, n));
 
+        std::fill(out.c.begin(), out.c.end(), 0.0);
         Pool pool(pt.threads);                    // 计时区外
 
         const auto t0 = Clock::now();
@@ -172,6 +180,19 @@ namespace bench {
 
         pool.wait_all();
         const auto t1 = Clock::now();
+
+        double checksum = 0.0;
+        for (std::size_t i = 0; i < out.c.size(); ++i) {
+            if (std::abs(out.c[i] - 4.0) > 1e-9) {
+                std::cerr << "\n[VALIDATION ERROR] elementwise mismatch at index " << i
+                          << " (threads=" << pt.threads << ", producers=" << pt.producers
+                          << ", n_tasks=" << pt.n_tasks << "): expected 4.0, got "
+                          << out.c[i] << '\n';
+                std::exit(1);
+            }
+            checksum += out.c[i];
+        }
+        do_not_optimize(checksum);
 
         Sample s;
         s.ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -261,7 +282,9 @@ namespace bench {
 // ============================================================================
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+#endif
     using namespace bench;
 
     const std::size_t kWaves = (argc > 1)

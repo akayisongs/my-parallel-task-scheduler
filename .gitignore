@@ -361,3 +361,16 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# VS hashed intermediate directory (project name with spaces)
+Parallel.dd17b981/
+
+# Linux CMake builds, clangd & perf profiling outputs
+build/
+build-*/
+compile_commands.json
+perf.data
+perf.data.old
+
+# Local editor settings
+.vscode/

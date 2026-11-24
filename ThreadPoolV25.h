@@ -19,6 +19,10 @@
 
 namespace szz::batch {
 
+	// 调整类型擦除接口可以放入不可复制移动的函数对象，避免了std::function的拷贝语义限制
+	using TaskType = std::move_only_function<void()>;
+	using Lock = std::unique_lock<std::mutex>;
+
 	//// v3.0代码内容
 	//struct alignas(64) WorkStealingQueue { // 64字节对齐，避免伪共享
 	//	std::deque<TaskType> deque_;
@@ -68,10 +72,6 @@ namespace szz::batch {
 	//		return deque_.size();
 	//	}
 	//};
-
-	// 调整类型擦除接口可以放入不可复制移动的函数对象，避免了std::function的拷贝语义限制
-	using TaskType = std::move_only_function<void()>;
-	using Lock = std::unique_lock<std::mutex>;
 
 	class ThreadPool {
 	private:

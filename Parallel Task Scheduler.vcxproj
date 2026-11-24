@@ -146,10 +146,10 @@
   <ItemGroup>
     <ClInclude Include="ThreadPoolV25.h" />
     <ClInclude Include="ThreadPool.h" />
+    <ClInclude Include="SchedulerContract.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="bench_scheduler.cpp" />
-    <ClCompile Include="gemm_benchmark.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
