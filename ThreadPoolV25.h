@@ -107,7 +107,7 @@ namespace szz::batch {
 
 			try {
 				for (std::size_t i = 0; i < threads; i++) {
-					workers_.emplace_back([this, threads]() {
+					workers_.emplace_back([this]() {
 
 						std::vector<TaskType> local_batch;
 						local_batch.reserve(kConsumerBatchLimit);
@@ -266,6 +266,7 @@ namespace szz::batch {
 		void enqueue_bulk(std::vector<TaskType>& batch_tasks) {
 			if (batch_tasks.empty()) return;
 			std::size_t pushed = 0;
+			std::size_t loc_workers_size = 0;
 
 			try {
 				Lock lock(queue_mutex_);
@@ -282,6 +283,7 @@ namespace szz::batch {
 				if (tasks_taken_ > 26214) {
 					steady_max_depth_ = std::max(steady_max_depth_, tasks_.size());
 				}
+				loc_workers_size = workers_.size();
 			}
 			catch (...) {
 				batch_tasks.clear(); // 避免残留已被 move 掏空的 TaskType 触发 ~Batch() 二次提交
@@ -294,7 +296,7 @@ namespace szz::batch {
 
 			if (pushed > 0) {
 				const std::size_t needed_workers = (pushed + kConsumerBatchLimit - 1) / kConsumerBatchLimit;
-				if (needed_workers >= workers_.size()) {
+				if (needed_workers >= loc_workers_size) {
 					cv_.notify_all();
 				}
 				else {
