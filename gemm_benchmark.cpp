@@ -9,14 +9,47 @@
 #endif
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
+#include <concepts>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <string>
+#include <string_view>
 #include <vector>
+#include "SchedulerContract.h"
 #include "ThreadPool.h"
+
+#if __has_include("ThreadPoolV25.h")
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-lambda-capture"
+#endif
+#include "ThreadPoolV25.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#define BENCH_HAS_V25 1
+#else
+#define BENCH_HAS_V25 0
+#endif
+
+static_assert(szz::contract::TaskScheduler<szz::ThreadPool>);
+static_assert(szz::contract::DetachedSubmittable<szz::ThreadPool, void (*)()>);
+static_assert(szz::contract::FutureSubmittable<szz::ThreadPool, void (*)()>);
+static_assert(szz::contract::HasStats<szz::ThreadPool>);
+
+#if BENCH_HAS_V25
+static_assert(szz::contract::TaskScheduler<szz::batch::ThreadPool>);
+static_assert(szz::contract::DetachedSubmittable<szz::batch::ThreadPool, void (*)()>);
+static_assert(szz::contract::FutureSubmittable<szz::batch::ThreadPool, void (*)()>);
+static_assert(szz::contract::HasStats<szz::batch::ThreadPool>);
+static_assert(szz::contract::BatchSubmittable<szz::batch::ThreadPool>);
+static_assert(szz::contract::HasBatchStats<szz::batch::ThreadPool>);
+#endif
 
 template <class T>
 inline void do_not_optimize(const T& value) noexcept {
@@ -133,10 +166,247 @@ double run_granularity_test(std::size_t num_threads, std::size_t num_tasks,
     return std::chrono::duration<double, std::milli>(end_time - start_time).count();
 }
 
-int main() {
+struct GemmCliOptions {
+    bool help{ false };
+    bool profile{ false };
+    std::string arm{ "v2.4" };
+    std::size_t threads{ 8 };
+    std::size_t rows{ 16 };
+    std::size_t size{ 1024 };
+    std::size_t waves{ 5 };
+};
+
+enum class GemmFlagMatch { NoMatch, Matched, Error };
+
+inline bool parse_positive_size(std::string_view sv, std::size_t& out) noexcept {
+    if (sv.empty()) return false;
+    std::size_t val = 0;
+    const char* begin = sv.data();
+    const char* end = begin + sv.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, val);
+    if (ec != std::errc{} || ptr != end || val == 0) return false;
+    out = val;
+    return true;
+}
+
+inline GemmFlagMatch match_flag_value(int argc, char** argv, int& idx,
+    std::string_view name, std::string_view& out_val, std::string& err) {
+    const std::string_view arg(argv[idx]);
+    if (arg == name) {
+        if (idx + 1 >= argc) {
+            err = "missing value for " + std::string(name);
+            return GemmFlagMatch::Error;
+        }
+        out_val = argv[++idx];
+        if (out_val.empty()) {
+            err = "empty value for " + std::string(name);
+            return GemmFlagMatch::Error;
+        }
+        return GemmFlagMatch::Matched;
+    }
+    if (arg.starts_with(name) && arg.size() > name.size() && arg[name.size()] == '=') {
+        out_val = arg.substr(name.size() + 1);
+        if (out_val.empty()) {
+            err = "empty value for " + std::string(name);
+            return GemmFlagMatch::Error;
+        }
+        return GemmFlagMatch::Matched;
+    }
+    return GemmFlagMatch::NoMatch;
+}
+
+inline void print_usage(std::ostream& os, const char* prog) {
+    os << "Usage:\n"
+       << "  " << prog << "            Run legacy baseline + scaling + granularity suite (writes CSV)\n"
+       << "  " << prog << " --profile [--arm <v2.4|v2.5>] [--threads <T>]"
+       << " [--rows <R>] [--size <N>] [--waves <W>]\n"
+       << "  " << prog << " --help\n\n"
+       << "Profile options (no warmup, no baseline, no experiment 2, no CSV):\n"
+       << "  --help         Show this usage and exit 0\n"
+       << "  --profile      Enable single-arm single-point perf isolation mode\n"
+       << "  --arm <name>   Scheduler arm: v2.4"
+#if BENCH_HAS_V25
+       << " or v2.5"
+#endif
+       << " (default: v2.4)\n"
+       << "  --threads <T>  Worker thread count >= 1 (default: 8)\n"
+       << "  --rows <R>     Rows per task >= 1 (default: 16)\n"
+       << "  --size <N>     Matrix dimension N >= 1 (default: 1024)\n"
+       << "  --waves <W>    Measured waves >= 1 (default: 5)\n";
+}
+
+inline bool parse_cli_args(int argc, char** argv, GemmCliOptions& opts, std::string& err) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--help") {
+            opts.help = true;
+            return true;
+        }
+    }
+
+    struct SizeFlag {
+        std::string_view name;
+        std::size_t* target;
+    };
+    const SizeFlag size_flags[] = {
+        { "--threads", &opts.threads },
+        { "--rows",    &opts.rows },
+        { "--size",    &opts.size },
+        { "--waves",   &opts.waves },
+    };
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg(argv[i]);
+        if (arg == "--profile") {
+            opts.profile = true;
+            continue;
+        }
+
+        std::string_view val;
+        const GemmFlagMatch arm_match = match_flag_value(argc, argv, i, "--arm", val, err);
+        if (arm_match == GemmFlagMatch::Error) return false;
+        if (arm_match == GemmFlagMatch::Matched) {
+            opts.arm = std::string(val);
+            continue;
+        }
+
+        bool matched_size = false;
+        for (const auto& sf : size_flags) {
+            const GemmFlagMatch m = match_flag_value(argc, argv, i, sf.name, val, err);
+            if (m == GemmFlagMatch::Error) return false;
+            if (m == GemmFlagMatch::Matched) {
+                if (!parse_positive_size(val, *sf.target)) {
+                    err = "invalid positive integer for " + std::string(sf.name) + ": " + std::string(val);
+                    return false;
+                }
+                matched_size = true;
+                break;
+            }
+        }
+        if (matched_size) continue;
+
+        err = "unknown or unexpected argument: " + std::string(arg);
+        return false;
+    }
+
+    if (!opts.profile) {
+        err = "--profile is required when arguments are provided";
+        return false;
+    }
+    if (opts.arm == "v2.5") {
+#if !BENCH_HAS_V25
+        err = "--arm v2.5 is unavailable (ThreadPoolV25.h not found)";
+        return false;
+#endif
+    }
+    else if (opts.arm != "v2.4") {
+        err = "unknown --arm '" + opts.arm + "' (expected v2.4"
+#if BENCH_HAS_V25
+            " or v2.5"
+#endif
+            ")";
+        return false;
+    }
+    return true;
+}
+
+template <szz::contract::TaskScheduler Pool>
+void run_profile_gemm(const char* arm_name, const GemmCliOptions& opts) {
+    const std::size_t N = opts.size;
+    const std::size_t rows_per_task = opts.rows;
+    const std::size_t n_tasks = (N + rows_per_task - 1) / rows_per_task;
+
+    std::vector<double> A(N * N, 1.5);
+    std::vector<double> B(N * N, 2.0);
+    std::vector<double> C(N * N, 0.0);
+
+    Pool pool(opts.threads);
+    double total_ms = 0.0;
+
+    for (std::size_t w = 0; w < opts.waves; ++w) {
+        // gemm_range 整行分支使用 += 累加写入，每轮运行前必须清零 C
+        std::fill(C.begin(), C.end(), 0.0);
+
+        const auto t0 = std::chrono::steady_clock::now();
+        if constexpr (szz::contract::BatchSubmittable<Pool>) {
+            {
+                auto batch = pool.make_batch();
+                for (std::size_t row = 0; row < N; row += rows_per_task) {
+                    const std::size_t end_row = std::min(row + rows_per_task, N);
+                    batch.submit([&A, &B, &C, N, row, end_row]() {
+                        gemm_range(A, B, C, N, row * N, end_row * N);
+                    });
+                }
+                batch.flush();
+            }
+        }
+        else {
+            for (std::size_t row = 0; row < N; row += rows_per_task) {
+                const std::size_t end_row = std::min(row + rows_per_task, N);
+                pool.enqueue_detached([&A, &B, &C, N, row, end_row]() {
+                    gemm_range(A, B, C, N, row * N, end_row * N);
+                });
+            }
+        }
+        pool.wait_all();
+        const auto t1 = std::chrono::steady_clock::now();
+
+        total_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        if (w == 0 || w + 1 == opts.waves) {
+            verify_array(C, 3.0 * static_cast<double>(N), "profile_gemm");
+        }
+    }
+
+    const double avg_ms = total_ms / static_cast<double>(opts.waves);
+    std::cout << "[profile] arm=" << arm_name
+              << " threads=" << opts.threads
+              << " size=" << N
+              << " rows=" << rows_per_task
+              << " n_tasks=" << n_tasks
+              << " waves=" << opts.waves
+              << std::fixed << std::setprecision(3)
+              << " total_ms=" << total_ms
+              << " avg_ms=" << avg_ms;
+
+    if constexpr (szz::contract::HasStats<Pool>) {
+        std::cout << " parks=" << pool.park_count()
+                  << " depth=" << pool.max_queue_depth();
+    }
+    if constexpr (szz::contract::HasBatchStats<Pool>) {
+        std::cout << " acq=" << pool.consumer_acquisitions()
+                  << " avg_take=" << std::setprecision(1) << pool.avg_take()
+                  << " s_depth=" << pool.steady_max_depth();
+    }
+    std::cout << '\n';
+}
+
+int main(int argc, char** argv) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
 #endif
+    if (argc > 1) {
+        GemmCliOptions opts;
+        std::string err;
+        if (!parse_cli_args(argc, argv, opts, err)) {
+            std::cerr << "Error: " << err << "\n\n";
+            print_usage(std::cerr, argv[0]);
+            return 1;
+        }
+        if (opts.help) {
+            print_usage(std::cout, argv[0]);
+            return 0;
+        }
+        if (opts.arm == "v2.4") {
+            run_profile_gemm<szz::ThreadPool>("v2.4", opts);
+        }
+#if BENCH_HAS_V25
+        else if (opts.arm == "v2.5") {
+            run_profile_gemm<szz::batch::ThreadPool>("v2.5", opts);
+        }
+#endif
+        return 0;
+    }
+
     const std::size_t N = 1024;
     std::vector<double> A(N * N, 1.5);
     std::vector<double> B(N * N, 2.0);

@@ -365,12 +365,14 @@ FodyWeavers.xsd
 # VS hashed intermediate directory (project name with spaces)
 Parallel.dd17b981/
 
-# Linux CMake builds, clangd & perf profiling outputs
+# Linux & cross-platform CMake builds, clangd & perf profiling outputs
 build/
 build-*/
+out/
+.vs/
+.cache/
 compile_commands.json
-perf.data
-perf.data.old
+perf*.data*
 
 # Local editor settings
 .vscode/
